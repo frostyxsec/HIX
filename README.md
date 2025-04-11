@@ -30,7 +30,9 @@
 ## 🔧 Usage
 
 ```bash
-./hix -l <url_list> -t <threads> -o <output.txt>
+chmod +x hix
+sudo mv hix /usr/bin
+hix -l <url_list> -t <threads> -o <output.txt>
 ```
 
 ### Parameters
@@ -46,7 +48,7 @@
 ## 🧪 Example
 
 ```bash
-./hix -l targets.txt -t 20 -o results.txt
+hix -l targets.txt -t 20 -o results.txt
 ```
 
 This command will scan all URLs in `targets.txt` using 20 threads and write any vulnerable results to `results.txt`.
