@@ -1,0 +1,234 @@
+#!/bin/bash
+
+# Host Header Injection Detection Script (HIX)
+# Usage: ./hix -l <url_list> -t <threads> -o <output.txt>
+
+# Default values
+threads=10
+output="hix_output.txt"
+url_list=""
+
+# ANSI color codes
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Banner
+show_banner() {
+    echo -e "${CYAN}"
+    echo -e "██╗  ██╗██╗██╗  ██╗"
+    echo -e "██║  ██║██║╚██╗██╔╝		Frostyxsec"
+    echo -e "███████║██║ ╚███╔╝ "
+    echo -e "██╔══██║██║ ██╔██╗ "
+    echo -e "██║  ██║██║██╔╝ ██╗"
+    echo -e "╚═╝  ╚═╝╚═╝╚═╝  ╚═╝"
+    echo -e "${NC}"
+    echo -e "${BLUE}Host Header Injection Scanner${NC}"
+    echo -e "${YELLOW}Press 'X' to continue or Ctrl+C to exit...${NC}"
+    
+    # Wait for user to press X to continue
+    while true; do
+        read -r -n 1 key
+        case $key in
+            [Xx]) break ;;
+            *) ;;
+        esac
+    done
+    echo -e "\n${GREEN}Starting...${NC}"
+}
+
+# Function to handle Ctrl+C
+ctrl_c() {
+    echo -e "\n${RED}Script interrupted by user. Exiting...${NC}"
+    # Perform cleanup if needed
+    rm -f "$output.lock" 2>/dev/null
+    exit 1
+}
+
+# Register the handler
+trap ctrl_c INT
+
+# Function to display usage
+usage() {
+    echo -e "${BLUE}Host Header Injection Scanner${NC}"
+    echo -e "Usage: $0 -l <url_list> -t <threads> -o <output.txt>"
+    echo -e "  -l  List of URLs (required)"
+    echo -e "  -t  Number of threads (default: 10)"
+    echo -e "  -o  Output file (default: hix_output.txt)"
+    exit 1
+}
+
+# Parse command line arguments
+while getopts ":l:t:o:" opt; do
+    case $opt in
+        l) url_list="$OPTARG" ;;
+        t) threads="$OPTARG" ;;
+        o) output="$OPTARG" ;;
+        \?) echo "Invalid option: -$OPTARG" >&2; usage ;;
+        :) echo "Option -$OPTARG requires an argument." >&2; usage ;;
+    esac
+done
+
+# Check if url_list is provided
+if [ -z "$url_list" ]; then
+    echo -e "${RED}Error:${NC} URL list is required."
+    usage
+fi
+
+# Check if url_list file exists
+if [ ! -f "$url_list" ]; then
+    echo -e "${RED}Error:${NC} URL list file not found: $url_list"
+    exit 1
+fi
+
+# Display banner and wait for user input
+show_banner
+
+# Create output directory if it doesn't exist
+output_dir=$(dirname "$output")
+if [ ! -d "$output_dir" ] && [ "$output_dir" != "." ]; then
+    echo -e "${YELLOW}Creating output directory:${NC} $output_dir"
+    mkdir -p "$output_dir" || { echo -e "${RED}Error:${NC} Failed to create output directory."; exit 1; }
+fi
+
+# Clear output file
+> "$output" || { echo -e "${RED}Error:${NC} Cannot write to output file: $output"; exit 1; }
+
+# Count total URLs
+total_urls=$(wc -l < "$url_list")
+echo -e "${BLUE}Starting scan on${NC} ${YELLOW}$total_urls${NC} ${BLUE}targets with${NC} ${YELLOW}$threads${NC} ${BLUE}threads${NC}"
+
+# Host header injection payloads
+payloads=(
+    "evil.com"
+    "localhost"
+    "127.0.0.1"
+    "example.com"
+    "attacker.com"
+    "hacker.com"
+)
+
+# Variables for tracking progress
+current=0
+vulnerable=0
+
+# Create lock files
+touch "$output.lock"
+
+# Trap function to clean up on exit
+cleanup() {
+    # Remove lock files
+    rm -f "$output.lock"
+    # Exit with proper code
+    exit ${1:-0}
+}
+
+# Set trap for clean exit
+trap 'cleanup $?' EXIT TERM
+
+# Function to test a single URL
+test_url() {
+    local url=$1
+    local domain=""
+    local was_vulnerable=0
+    
+    # Extract domain from URL
+    if [[ $url =~ ^https?://([^/]+) ]]; then
+        domain="${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+    
+    # Test each payload
+    for payload in "${payloads[@]}"; do
+        # Display testing status
+        echo -e "${YELLOW}Testing${NC} $url ${BLUE}with payload${NC} $payload"
+        
+        # Make the request with modified Host header, timeout after 5 seconds
+        response=$(curl -s -k -m 5 -o /dev/null -w "%{http_code}" -H "Host: $payload" "$url" 2>/dev/null)
+        
+        if [ "$response" == "000" ]; then
+            # Connection timed out or failed
+            echo -e "${RED}Connection failed or timed out for${NC} $url"
+            break
+        elif [ "$response" == "200" ] || [ "$response" == "301" ] || [ "$response" == "302" ]; then
+            # Check if the response contains any indication of vulnerability
+            body=$(curl -s -k -m 5 -H "Host: $payload" "$url" 2>/dev/null)
+            
+            # Look for signs of vulnerability
+            if [[ $body == *"$payload"* || $response == "302" || $response == "301" ]]; then
+                echo -e "${GREEN}[VULNERABLE]${NC} $url ${BLUE}with payload${NC} $payload"
+                
+                # Save to output file (using a lock to prevent race conditions)
+                {
+                    flock -x 200
+                    echo "[VULNERABLE] $url - Payload: $payload" >> "$output"
+                    was_vulnerable=1
+                } 200>"$output.lock"
+                
+                # Break the payload loop as we found a vulnerability
+                break
+            else
+                echo -e "${RED}[NOT VULNERABLE]${NC} $url ${BLUE}with payload${NC} $payload"
+            fi
+        else
+            echo -e "${RED}[NOT VULNERABLE]${NC} $url ${BLUE}with payload${NC} $payload ${BLUE}(Status: $response)${NC}"
+        fi
+    done
+    
+    # Update counter
+    ((current++))
+    
+    return $was_vulnerable
+}
+
+# Function for processing URLs
+process_urls() {
+    echo -e "${YELLOW}Processing with $threads threads${NC}"
+    
+    # Array to store running PIDs
+    declare -a pids=()
+    
+    # Read URLs line by line
+    while IFS= read -r url; do
+        # Check if we already have max threads running
+        while [ ${#pids[@]} -ge $threads ]; do
+            # Check which processes have completed
+            for i in "${!pids[@]}"; do
+                if ! kill -0 ${pids[$i]} 2>/dev/null; then
+                    unset pids[$i]
+                fi
+            done
+            # Reindex the array
+            pids=("${pids[@]}")
+            sleep 0.5
+        done
+        
+        # Process URL in background
+        (test_url "$url") &
+        pids+=($!)
+        
+    done < "$url_list"
+    
+    # Wait for all remaining processes to finish
+    for pid in "${pids[@]}"; do
+        wait $pid 2>/dev/null
+    done
+}
+
+# Process URLs
+process_urls
+
+# Final count of vulnerable URLs
+vulnerable=$(grep -c "\[VULNERABLE\]" "$output")
+
+# Print summary
+echo -e "\n${GREEN}Scan completed!${NC}"
+echo -e "${BLUE}Processed URLs:${NC} $total_urls"
+echo -e "${BLUE}Vulnerable URLs:${NC} $vulnerable"
+echo -e "${BLUE}Results saved to:${NC} $output"
+
+exit 0
